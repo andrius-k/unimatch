@@ -638,6 +638,256 @@ def validate_kitti(model,
     return results
 
 
+
+@torch.no_grad()
+def validate_custom(model,
+                   padding_factor=8,
+                   with_speed_metric=False,
+                   average_over_pixels=True,
+                   attn_type='swin',
+                   attn_splits_list=False,
+                   corr_radius_list=False,
+                   prop_radius_list=False,
+                   num_reg_refine=1,
+                   debug=False,
+                   ):
+    """ Peform validation using custom (train) split """
+    model.eval()
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    data_base_path = "/cluster/work/cvl/haofxu/dynamic_nerf/data/Sequence_7/main/"
+
+    # source_ids = [415, 416, 417, 418, 419]
+    # source_ids = [x for x in range(415, 440)]
+    source_ids = [x for x in range(417, 440)]
+
+    for source_id in source_ids[1:]:
+        img1_id = source_ids[0]
+        img2_id = source_id
+
+        img1_id_str = str(img1_id).zfill(4)
+        img2_id_str = str(img2_id).zfill(4)
+
+        for direction in ["fwd", "bwd"]:
+
+            print(f"Computing optical flow {img1_id} -> {img2_id} ({direction})")
+
+            img1_path = os.path.join(data_base_path, f"camera_{img1_id_str}.jpeg")
+            img2_path = os.path.join(data_base_path, f"camera_{img2_id_str}.jpeg")
+
+            if direction == "bwd":
+                # Swap inputs for backward flow
+                img1_path, img2_path = img2_path, img1_path
+
+            img1 = frame_utils.read_gen(img1_path)
+            img2 = frame_utils.read_gen(img2_path)
+
+            img1 = np.array(img1).astype(np.uint8)[..., :3]
+            img2 = np.array(img2).astype(np.uint8)[..., :3]
+
+            # pad width to 800
+            # pad = np.zeros((1280, 80, 3))
+            # img1 = np.hstack((img1, pad))
+            # img2 = np.hstack((img2, pad))
+
+            img1 = torch.from_numpy(img1).permute(2, 0, 1).float().to(device)
+            img2 = torch.from_numpy(img2).permute(2, 0, 1).float().to(device)
+
+            results_dict = model(img1, img2,
+                                attn_type=attn_type,
+                                attn_splits_list=attn_splits_list,
+                                corr_radius_list=corr_radius_list,
+                                prop_radius_list=prop_radius_list,
+                                num_reg_refine=num_reg_refine,
+                                task='flow',
+                                )
+
+            # useful when using parallel branches
+            flow_pr = results_dict['flow_preds'][-1]
+            flow = flow_pr[0].permute(1, 2, 0).cpu().numpy()  # [H, W, 2]
+
+            flow_output_file = f"output/flow_{img1_id_str}_{img2_id_str}_{direction}.flo"
+            image_output_file = f"output/flow_{img1_id_str}_{img2_id_str}_{direction}.png"
+
+            # Write to file
+            frame_utils.writeFlow(flow_output_file, flow)
+            save_vis_flow_tofile(flow, image_output_file)
+
+
+
+    return {}
+    img1_id = 415
+    img2_id = 419
+    img1_id_str = str(img1_id).zfill(4)
+    img2_id_str = str(img2_id).zfill(4)
+
+    img1 = frame_utils.read_gen(os.path.join(data_base_path, f"camera_{img1_id_str}.jpeg"))
+    img2 = frame_utils.read_gen(os.path.join(data_base_path, f"camera_{img2_id_str}.jpeg"))
+
+    if len(np.array(img1).shape) == 2:  # gray image
+        img1 = img1.convert('RGB')
+        img2 = img2.convert('RGB')
+
+    img1 = np.array(img1).astype(np.uint8)[..., :3]
+    img2 = np.array(img2).astype(np.uint8)[..., :3]
+
+    img1 = torch.from_numpy(img1).permute(2, 0, 1).float()
+    img2 = torch.from_numpy(img2).permute(2, 0, 1).float()
+
+    results_dict = model(img1, img2,
+                             attn_type=attn_type,
+                             attn_splits_list=attn_splits_list,
+                             corr_radius_list=corr_radius_list,
+                             prop_radius_list=prop_radius_list,
+                             num_reg_refine=num_reg_refine,
+                             task='flow',
+                             )
+
+    # useful when using parallel branches
+    flow_pr = results_dict['flow_preds'][-1]
+    flow = flow_pr[0].permute(1, 2, 0).cpu().numpy()  # [H, W, 2]
+
+    flow_output_file = f"output/flow_{img1_id_str}_{img2_id_str}_fwd.flo"
+    image_output_file = f"output/flow_{img1_id_str}_{img2_id_str}_fwd.png"
+
+    # Write to file
+    frame_utils.writeFlow(flow_output_file, flow)
+    save_vis_flow_tofile(flow, image_output_file)
+
+    return {}
+
+    val_dataset = KITTI(split='training')
+    print('Number of validation image pairs: %d' % len(val_dataset))
+
+    out_list, epe_list = [], []
+    results = {}
+
+    if with_speed_metric:
+        if average_over_pixels:
+            s0_10_list = []
+            s10_40_list = []
+            s40plus_list = []
+        else:
+            s0_10_epe_sum = 0
+            s0_10_valid_samples = 0
+            s10_40_epe_sum = 0
+            s10_40_valid_samples = 0
+            s40plus_epe_sum = 0
+            s40plus_valid_samples = 0
+
+    for val_id in range(len(val_dataset)):
+        image1, image2, flow_gt, valid_gt = val_dataset[val_id]
+        image1 = image1[None].cuda()
+        image2 = image2[None].cuda()
+
+        padder = InputPadder(image1.shape, mode='kitti', padding_factor=padding_factor)
+        image1, image2 = padder.pad(image1, image2)
+
+        results_dict = model(image1, image2,
+                             attn_type=attn_type,
+                             attn_splits_list=attn_splits_list,
+                             corr_radius_list=corr_radius_list,
+                             prop_radius_list=prop_radius_list,
+                             num_reg_refine=num_reg_refine,
+                             task='flow',
+                             )
+
+        # useful when using parallel branches
+        flow_pr = results_dict['flow_preds'][-1]
+
+        flow = padder.unpad(flow_pr[0]).cpu()
+
+        epe = torch.sum((flow - flow_gt) ** 2, dim=0).sqrt()
+        mag = torch.sum(flow_gt ** 2, dim=0).sqrt()
+
+        if with_speed_metric:
+            # flow_gt_speed = torch.sum(flow_gt ** 2, dim=0).sqrt()
+            flow_gt_speed = mag
+
+            if average_over_pixels:
+                valid_mask = (flow_gt_speed < 10) * (valid_gt >= 0.5)  # note KITTI GT is sparse
+                if valid_mask.max() > 0:
+                    s0_10_list.append(epe[valid_mask].cpu().numpy())
+
+                valid_mask = (flow_gt_speed >= 10) * (flow_gt_speed <= 40) * (valid_gt >= 0.5)
+                if valid_mask.max() > 0:
+                    s10_40_list.append(epe[valid_mask].cpu().numpy())
+
+                valid_mask = (flow_gt_speed > 40) * (valid_gt >= 0.5)
+                if valid_mask.max() > 0:
+                    s40plus_list.append(epe[valid_mask].cpu().numpy())
+
+            else:
+                valid_mask = (flow_gt_speed < 10) * (valid_gt >= 0.5)  # note KITTI GT is sparse
+                if valid_mask.max() > 0:
+                    s0_10_epe_sum += (epe * valid_mask).sum() / valid_mask.sum()
+                    s0_10_valid_samples += 1
+
+                valid_mask = (flow_gt_speed >= 10) * (flow_gt_speed <= 40) * (valid_gt >= 0.5)
+                if valid_mask.max() > 0:
+                    s10_40_epe_sum += (epe * valid_mask).sum() / valid_mask.sum()
+                    s10_40_valid_samples += 1
+
+                valid_mask = (flow_gt_speed > 40) * (valid_gt >= 0.5)
+                if valid_mask.max() > 0:
+                    s40plus_epe_sum += (epe * valid_mask).sum() / valid_mask.sum()
+                    s40plus_valid_samples += 1
+
+        epe = epe.view(-1)
+        mag = mag.view(-1)
+        val = valid_gt.view(-1) >= 0.5
+
+        out = ((epe > 3.0) & ((epe / mag) > 0.05)).float()
+
+        if average_over_pixels:
+            epe_list.append(epe[val].cpu().numpy())
+        else:
+            epe_list.append(epe[val].mean().item())
+
+        out_list.append(out[val].cpu().numpy())
+
+        if debug:
+            if val_id > 10:
+                break
+
+    if average_over_pixels:
+        epe_list = np.concatenate(epe_list)
+    else:
+        epe_list = np.array(epe_list)
+    out_list = np.concatenate(out_list)
+
+    epe = np.mean(epe_list)
+    f1 = 100 * np.mean(out_list)
+
+    print("Validation KITTI EPE: %.3f, F1-all: %.3f" % (epe, f1))
+    results['kitti_epe'] = epe
+    results['kitti_f1'] = f1
+
+    if with_speed_metric:
+        if average_over_pixels:
+            s0_10 = np.mean(np.concatenate(s0_10_list))
+            s10_40 = np.mean(np.concatenate(s10_40_list))
+            s40plus = np.mean(np.concatenate(s40plus_list))
+        else:
+            s0_10 = s0_10_epe_sum / s0_10_valid_samples
+            s10_40 = s10_40_epe_sum / s10_40_valid_samples
+            s40plus = s40plus_epe_sum / s40plus_valid_samples
+
+        print("Validation KITTI s0_10: %.3f, s10_40: %.3f, s40+: %.3f" % (
+            s0_10,
+            s10_40,
+            s40plus))
+
+        results['kitti_s0_10'] = s0_10
+        results['kitti_s10_40'] = s10_40
+        results['kitti_s40+'] = s40plus
+
+    return results
+
+
+
+
 @torch.no_grad()
 def inference_flow(model,
                    inference_dir,

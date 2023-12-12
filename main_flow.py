@@ -1,6 +1,13 @@
+print("0.1")
+
 import torch
+print(torch.__file__)
+print("0.2")
 from torch.utils.data import DataLoader
+print("0.3")
 from torch.utils.tensorboard import SummaryWriter
+
+print("0.4")
 
 import argparse
 import numpy as np
@@ -12,7 +19,7 @@ from loss.flow_loss import flow_loss_func
 
 from evaluate_flow import (validate_chairs, validate_things, validate_sintel, validate_kitti,
                            create_kitti_submission, create_sintel_submission,
-                           inference_flow,
+                           inference_flow, validate_custom,
                            )
 
 from utils.logger import Logger
@@ -135,6 +142,7 @@ def get_args_parser():
 
 
 def main(args):
+    print("1")
     print_info = not args.eval and not args.submission and args.inference_dir is None and args.inference_video is None
 
     if print_info and args.local_rank == 0:
@@ -151,6 +159,8 @@ def main(args):
     np.random.seed(seed)
 
     torch.backends.cudnn.benchmark = True
+
+    print("2")
 
     if args.launcher == 'none':
         args.distributed = False
@@ -171,6 +181,7 @@ def main(args):
 
         setup_for_distributed(args.local_rank == 0)
 
+    print("3")
     # model
     model = UniMatch(feature_channels=args.feature_channels,
                      num_scales=args.num_scales,
@@ -180,6 +191,8 @@ def main(args):
                      num_transformer_layers=args.num_transformer_layers,
                      reg_refine=args.reg_refine,
                      task=args.task).to(device)
+
+    print("4")
 
     if print_info:
         print(model)
@@ -208,6 +221,8 @@ def main(args):
 
     optimizer = torch.optim.AdamW(model_without_ddp.parameters(), lr=args.lr,
                                   weight_decay=args.weight_decay)
+
+    print("5")
 
     start_epoch = 0
     start_step = 0
@@ -275,6 +290,19 @@ def main(args):
 
         if 'kitti' in args.val_dataset:
             results_dict = validate_kitti(model_without_ddp,
+                                          padding_factor=args.padding_factor,
+                                          with_speed_metric=args.with_speed_metric,
+                                          attn_type=args.attn_type,
+                                          attn_splits_list=args.attn_splits_list,
+                                          corr_radius_list=args.corr_radius_list,
+                                          prop_radius_list=args.prop_radius_list,
+                                          num_reg_refine=args.num_reg_refine,
+                                          debug=args.debug,
+                                          )
+            val_results.update(results_dict)
+
+        if 'custom' in args.val_dataset:
+            results_dict = validate_custom(model_without_ddp,
                                           padding_factor=args.padding_factor,
                                           with_speed_metric=args.with_speed_metric,
                                           attn_type=args.attn_type,
